@@ -1,0 +1,194 @@
+import numpy as np
+import pandas as pd
+
+file_path = ('/Users/eitansaidel/Downloads/heart.csv')
+data = pd.read_csv(file_path)
+
+categorical_features = ['Sex', 'ChestPainType', 'RestingECG', 'ExerciseAngina', 'ST_Slope']
+data = pd.get_dummies(data, columns=categorical_features, drop_first=True)
+features = data.drop(columns=['HeartDisease'])
+target = data['HeartDisease']
+
+features = features.fillna(0).astype(float)
+target = target.astype(int)
+
+numeric_features = features.select_dtypes(include=[np.number]).columns
+features[numeric_features] = (features[numeric_features] - features[numeric_features].min()) / (features[numeric_features].max() - features[numeric_features].min())
+
+def split_data(features, target, val_fraction=0.2, test_fraction=0.2, seed=None):
+    np.random.seed(seed)
+    indices = np.arange(len(features))
+    np.random.shuffle(indices)
+
+    test_split_index = int(len(features) * (1 - test_fraction))
+    val_split_index = int(test_split_index * (1 - val_fraction))
+
+    train_indices = indices[:val_split_index]
+    val_indices = indices[val_split_index:test_split_index]
+    test_indices = indices[test_split_index:]
+
+    return (features.iloc[train_indices], features.iloc[val_indices], features.iloc[test_indices],
+            target.iloc[train_indices], target.iloc[val_indices], target.iloc[test_indices])
+
+features_train, features_val, features_test, target_train, target_val, target_test = split_data(features, target, val_fraction=0.2, test_fraction=0.2, seed=42)
+
+def compute_metrics(true_data, predicted):
+    true_positives = np.sum((true_data == 1) & (predicted == 1))
+    true_negatives = np.sum((true_data == 0) & (predicted == 0))
+    false_positives = np.sum((true_data == 0) & (predicted == 1))
+    false_negatives = np.sum((true_data == 1) & (predicted == 0))
+
+    accuracy = (true_positives + true_negatives) / len(true_data) if (true_positives + false_positives) > 0 else 0
+    precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0
+    recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0
+    f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+
+    return accuracy, precision, recall, f1_score
+
+def knn(features_train, target_train, features_test, neighbors):
+    train_array = features_train.to_numpy()
+    target_array = target_train.to_numpy()
+    test_array = features_test.to_numpy()
+
+    predictions = []
+    for test_instance in test_array:
+        distances = np.sqrt(np.sum((train_array - test_instance) ** 2, axis=1))
+        nearest_indices = np.argsort(distances)[:neighbors]
+        nearest_labels = target_array[nearest_indices]
+        predictions.append(np.bincount(nearest_labels).argmax())
+    return np.array(predictions)
+
+def naive_bayes(features_train, target_train, features_test):
+    class_zero = features_train[target_train == 0]
+    class_one = features_train[target_train == 1]
+
+    prior_zero = len(class_zero) / len(features_train)
+    prior_one = len(class_one) / len(features_train)
+
+    mean_zero, var_zero = class_zero.mean(), class_zero.var()
+    mean_one, var_one = class_one.mean(), class_one.var()
+
+    test_array = features_test.to_numpy()
+    predictions = []
+    for test_instance in test_array:
+        likelihood_zero = np.prod((1 / np.sqrt(2 * np.pi * var_zero)) * np.exp(-((test_instance - mean_zero) ** 2) / (2 * var_zero)))
+        likelihood_one = np.prod((1 / np.sqrt(2 * np.pi * var_one)) * np.exp(-((test_instance - mean_one) ** 2) / (2 * var_one)))
+        posterior_zero = prior_zero * likelihood_zero
+        posterior_one = prior_one * likelihood_one
+        predictions.append(0 if posterior_zero * 0.6 > posterior_one else 1)
+    return np.array(predictions)
+
+def decision_tree(features_train, target_train, features_test):
+    class Tree:
+        def __init__(self, feature=None, threshold=None, left=None, right=None, value=None):
+            self.feature = feature
+            self.threshold = threshold
+            self.left = left
+            self.right = right
+            self.value = value
+
+    def calculate_entropy(labels):
+        probabilities = np.bincount(labels) / len(labels)
+        return -np.sum([p * np.log2(p) for p in probabilities if p > 0])
+
+    def split_data(features, labels, feature, threshold):
+        left_mask = features[:, feature] <= threshold
+        right_mask = features[:, feature] > threshold
+        return features[left_mask], features[right_mask], labels[left_mask], labels[right_mask]
+
+    def find_best_split(features, labels):
+        best_feature, best_threshold, best_gain = None, None, -1
+        base_entropy = calculate_entropy(labels)
+        for feature in range(features.shape[1]):
+            thresholds = np.unique(features[:, feature])
+            for threshold in thresholds:
+                features_left, features_right, labels_left, labels_right = split_data(features, labels, feature, threshold)
+                if len(labels_left) > 0 and len(labels_right) > 0:
+                    gain = base_entropy - (len(labels_left) / len(labels) * calculate_entropy(labels_left) +
+                                           len(labels_right) / len(labels) * calculate_entropy(labels_right))
+                    if gain > best_gain:
+                        best_feature, best_threshold, best_gain = feature, threshold, gain
+        return best_feature, best_threshold
+
+    def build_tree(features, labels, depth=0, max_depth=2):
+        if len(np.unique(labels)) == 1 or depth == max_depth:
+            return Tree(value=np.bincount(labels).argmax())
+
+        feature, threshold = find_best_split(features, labels)
+        if feature is None:
+            return Tree(value=np.bincount(labels).argmax())
+
+        features_left, features_right, labels_left, labels_right = split_data(features, labels, feature, threshold)
+        left = build_tree(features_left, labels_left, depth + 1, max_depth)
+        right = build_tree(features_right, labels_right, depth + 1, max_depth)
+        return Tree(feature, threshold, left, right)
+
+    def predict(tree, features):
+        predictions = []
+        for instance in features:
+            node = tree
+            while node.value is None:
+                if instance[node.feature] <= node.threshold:
+                    node = node.left
+                else:
+                    node = node.right
+            predictions.append(node.value)
+        return np.array(predictions)
+
+    tree_model = build_tree(features_train.values, target_train.values)
+    return predict(tree_model, features_test.values)
+
+def ensemble_voting(*predictions):
+    return np.array([np.bincount(p).argmax() for p in zip(*predictions)])
+
+k_neighbors = 15
+
+target_train_pred_knn = knn(features_train, target_train, features_train, neighbors=k_neighbors)
+target_val_pred_knn = knn(features_train, target_train, features_val, neighbors=k_neighbors)
+target_test_pred_knn = knn(features_train, target_train, features_test, neighbors=k_neighbors)
+train_knn = compute_metrics(target_train.values, target_train_pred_knn)
+valid_knn = compute_metrics(target_val.values, target_val_pred_knn)
+test_knn = compute_metrics(target_test.values, target_test_pred_knn)
+
+target_train_pred_nb = naive_bayes(features_train, target_train, features_train)
+target_val_pred_nb = naive_bayes(features_train, target_train, features_val)
+target_test_pred_nb = naive_bayes(features_train, target_train, features_test)
+train_nb = compute_metrics(target_train.values, target_train_pred_nb)
+valid_nb = compute_metrics(target_val.values, target_val_pred_nb)
+test_nb = compute_metrics(target_test.values, target_test_pred_nb)
+
+target_train_pred_dt = decision_tree(features_train, target_train, features_train)
+target_val_pred_dt = decision_tree(features_train, target_train, features_val)
+target_test_pred_dt = decision_tree(features_train, target_train, features_test)
+train_dt = compute_metrics(target_train.values, target_train_pred_dt)
+valid_dt = compute_metrics(target_val.values, target_val_pred_dt)
+test_dt = compute_metrics(target_test.values, target_test_pred_dt)
+
+
+target_train_pred_ensemble = ensemble_voting(target_train_pred_knn, target_train_pred_nb, target_train_pred_dt)
+target_val_pred_ensemble = ensemble_voting(target_val_pred_knn, target_val_pred_nb, target_val_pred_dt)
+target_test_pred_ensemble = ensemble_voting(target_test_pred_knn, target_test_pred_nb, target_test_pred_dt)
+
+train_ensemble = compute_metrics(target_train.values, target_train_pred_ensemble)
+valid_ensemble = compute_metrics(target_val.values, target_val_pred_ensemble)
+test_ensemble = compute_metrics(target_test.values, target_test_pred_ensemble)
+
+print("KNN:")
+print(f"  Train: Accuracy={train_knn[0]:.4f}, Precision={train_knn[1]:.4f}, Recall={train_knn[2]:.4f}, F1-Score={train_knn[3]:.4f}")
+print(f"  Validation: Accuracy={valid_knn[0]:.4f}, Precision={valid_knn[1]:.4f}, Recall={valid_knn[2]:.4f}, F1-Score={valid_knn[3]:.4f}")
+print(f"  Test: Accuracy={test_knn[0]:.4f}, Precision={test_knn[1]:.4f}, Recall={test_knn[2]:.4f}, F1-Score={test_knn[3]:.4f}")
+
+print("\nNaive Bayes:")
+print(f"  Train: Accuracy={train_nb[0]:.4f}, Precision={train_nb[1]:.4f}, Recall={train_nb[2]:.4f}, F1-Score={train_nb[3]:.4f}")
+print(f"  Validation: Accuracy={valid_nb[0]:.4f}, Precision={valid_nb[1]:.4f}, Recall={valid_nb[2]:.4f}, F1-Score={valid_nb[3]:.4f}")
+print(f"  Test: Accuracy={test_nb[0]:.4f}, Precision={test_nb[1]:.4f}, Recall={test_nb[2]:.4f}, F1-Score={test_nb[3]:.4f}")
+
+print("\nDecision Tree:")
+print(f"  Train: Accuracy={train_dt[0]:.4f}, Precision={train_dt[1]:.4f}, Recall={train_dt[2]:.4f}, F1-Score={train_dt[3]:.4f}")
+print(f"  Validation: Accuracy={valid_dt[0]:.4f}, Precision={valid_dt[1]:.4f}, Recall={valid_dt[2]:.4f}, F1-Score={valid_dt[3]:.4f}")
+print(f"  Test: Accuracy={test_dt[0]:.4f}, Precision={test_dt[1]:.4f}, Recall={test_dt[2]:.4f}, F1-Score={test_dt[3]:.4f}")
+
+print("\nEnsemble Model:")
+print(f"  Train: Accuracy={train_ensemble[0]:.4f}, Precision={train_ensemble[1]:.4f}, Recall={train_ensemble[2]:.4f}, F1-Score={train_ensemble[3]:.4f}")
+print(f"  Validation: Accuracy={valid_ensemble[0]:.4f}, Precision={valid_ensemble[1]:.4f}, Recall={valid_ensemble[2]:.4f}, F1-Score={valid_ensemble[3]:.4f}")
+print(f"  Test: Accuracy={test_ensemble[0]:.4f}, Precision={test_ensemble[1]:.4f}, Recall={test_ensemble[2]:.4f}, F1-Score={test_ensemble[3]:.4f}")
